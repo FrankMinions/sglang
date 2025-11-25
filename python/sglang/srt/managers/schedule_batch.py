@@ -84,6 +84,7 @@ from sglang.srt.server_args import ServerArgs, get_global_server_args
 from sglang.srt.utils import flatten_nested_list
 from sglang.srt.utils.common import is_npu
 from sglang.srt.utils.cuda_ipc_transport_utils import CudaIpcTensorTransportProxy
+from sglang.srt.utils.shm_ipc_transport_utils import ShmIpcTensorTransportProxy
 
 _is_npu = is_npu()
 
@@ -1424,6 +1425,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 if isinstance(pixel_values, torch.Tensor):
                     mm_item.feature = pixel_values.to(self.device, non_blocking=True)
                 elif isinstance(pixel_values, CudaIpcTensorTransportProxy):
+                    mm_item.feature = pixel_values.reconstruct_on_target_device(
+                        torch.cuda.current_device()
+                    )
+                elif isinstance(pixel_values, ShmIpcTensorTransportProxy):
                     mm_item.feature = pixel_values.reconstruct_on_target_device(
                         torch.cuda.current_device()
                     )

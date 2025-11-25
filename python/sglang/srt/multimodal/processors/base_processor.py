@@ -26,10 +26,16 @@ from sglang.srt.utils.cuda_ipc_transport_utils import (
     CudaIpcTensorTransportProxy,
     MmItemMemoryPool,
 )
+from sglang.srt.utils.shm_ipc_transport_utils import (
+    SHM_IPC_FEATURE_CACHE_SIZE,
+    ShmIpcTensorTransportProxy,
+    ShmIpcMemoryPool,
+)
 
 _is_npu = is_npu()
 
 SGL_USE_CUDA_IPC = get_bool_env_var("SGLANG_USE_CUDA_IPC_TRANSPORT")
+SGL_USE_SHM_IPC = get_bool_env_var("SGLANG_USE_SHM_IPC_TRANSPORT")
 
 
 @dataclasses.dataclass
@@ -226,6 +232,8 @@ class BaseMultimodalProcessor(ABC):
 
         if SGL_USE_CUDA_IPC:
             self.cudaipc_mmfeature_pool = MmItemMemoryPool(MM_FEATURE_CACHE_SIZE)
+        if SGL_USE_SHM_IPC:
+            self.shmipc_mmfeature_pool = ShmIpcMemoryPool(SHM_IPC_FEATURE_CACHE_SIZE)
 
     def process_mm_data(
         self, input_text, images=None, videos=None, audios=None, **kwargs
@@ -273,7 +281,7 @@ class BaseMultimodalProcessor(ABC):
         if not self.server_args.keep_mm_feature_on_device:
             # move feature tensors to cpu
             for feature_name in self.FEATURE_NAMES:
-                if SGL_USE_CUDA_IPC:
+                if SGL_USE_CUDA_IPC or SGL_USE_SHM_IPC:
                     pass
                 else:
                     if feature_name in result and isinstance(
@@ -729,6 +737,46 @@ class BaseMultimodalProcessor(ABC):
                         item.precomputed_embeddings = CudaIpcTensorTransportProxy(
                             data=available_slice,
                             info_data=item.precomputed_embeddings,
+                            sync_buffer_meta=sync_flag,
+                        )
+
+        elif SGL_USE_SHM_IPC:
+            # post-process with shared memory IPC
+            for item in all_collected_items:
+                if isinstance(item.feature, torch.Tensor):
+                    # Move to CPU first for shared memory
+                    feature_cpu = item.feature.to("cpu") if item.feature.is_cuda else item.feature
+                    sync_flag, available_slice = (
+                        self.shmipc_mmfeature_pool.return_a_slice_tensor_with_flag(
+                            feature_cpu
+                        )
+                    )
+                    if isinstance(available_slice, torch.Tensor):
+                        available_slice.copy_(feature_cpu.view(torch.int8).view(-1))
+                        item.feature = ShmIpcTensorTransportProxy(
+                            data=available_slice,
+                            info_data=feature_cpu,
+                            sync_buffer_meta=sync_flag,
+                        )
+                elif isinstance(item.precomputed_embeddings, torch.Tensor):
+                    # Move to CPU first for shared memory
+                    embeddings_cpu = (
+                        item.precomputed_embeddings.to("cpu")
+                        if item.precomputed_embeddings.is_cuda
+                        else item.precomputed_embeddings
+                    )
+                    sync_flag, available_slice = (
+                        self.shmipc_mmfeature_pool.return_a_slice_tensor_with_flag(
+                            embeddings_cpu
+                        )
+                    )
+                    if isinstance(available_slice, torch.Tensor):
+                        available_slice.copy_(
+                            embeddings_cpu.view(torch.int8).view(-1)
+                        )
+                        item.precomputed_embeddings = ShmIpcTensorTransportProxy(
+                            data=available_slice,
+                            info_data=embeddings_cpu,
                             sync_buffer_meta=sync_flag,
                         )
 

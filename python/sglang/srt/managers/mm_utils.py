@@ -18,6 +18,7 @@ from sglang.srt.managers.schedule_batch import (
     MultimodalDataItem,
     MultimodalInputs,
 )
+from sglang.srt.utils.shm_ipc_transport_utils import ShmIpcTensorTransportProxy
 from sglang.srt.mem_cache.multimodal_cache import MultiModalStaticCache
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.server_args import get_global_server_args
@@ -813,6 +814,9 @@ def hash_feature(f):
     elif isinstance(f, torch.Tensor):
         return tensor_hash([f])
     elif isinstance(f, CudaIpcTensorTransportProxy):
+        reconstruct_t = f.reconstruct_on_target_device(torch.cuda.current_device())
+        return tensor_hash([reconstruct_t])
+    elif isinstance(f, ShmIpcTensorTransportProxy):
         reconstruct_t = f.reconstruct_on_target_device(torch.cuda.current_device())
         return tensor_hash([reconstruct_t])
     return data_hash(f)
