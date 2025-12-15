@@ -266,6 +266,7 @@ class ServerArgs:
     mem_fraction_static: Optional[float] = None
     max_running_requests: Optional[int] = None
     max_queued_requests: Optional[int] = None
+    max_wait_time_s: Optional[float] = None
     max_total_tokens: Optional[int] = None
     chunked_prefill_size: Optional[int] = None
     max_prefill_tokens: int = 16384
@@ -689,6 +690,14 @@ class ServerArgs:
             self.random_seed = random.randint(0, 1 << 30)
         if self.mm_process_config is None:
             self.mm_process_config = {}
+
+        if self.max_wait_time_s is None:
+            env_sched_timeout = envs.SGLANG_SCHEDULER_MAX_WAIT_TIME_S.get()
+            if env_sched_timeout is not None and env_sched_timeout > 0:
+                self.max_wait_time_s = env_sched_timeout
+
+        if self.max_wait_time_s is not None and self.max_wait_time_s <= 0:
+            self.max_wait_time_s = None
 
     def _handle_gpu_memory_settings(self, gpu_mem):
         """

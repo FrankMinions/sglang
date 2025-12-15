@@ -1526,6 +1526,37 @@ class Scheduler(
         )
         return req_to_abort.rid == recv_req.rid
 
+    def _expire_waiting_requests(self):
+        """Abort requests that stay too long in waiting_queue based on server setting."""
+        timeout_s = self.server_args.max_wait_time_s
+        if not timeout_s:
+            return
+        now = time.perf_counter()
+        remaining: List[Req] = []
+        for req in self.waiting_queue:
+            entry_time = req.time_stats.wait_queue_entry_time
+            if entry_time > 0 and now - entry_time > timeout_s:
+                abort_req = AbortReq(
+                    finished_reason={
+                        "type": "abort",
+                        "status_code": HTTPStatus.SERVICE_UNAVAILABLE,
+                        "message": "The request queue is full.",
+                    },
+                    rid=req.rid,
+                )
+                self.send_to_tokenizer.send_output(abort_req, req)
+            else:
+                remaining.append(req)
+        num_abort_req = len(self.waiting_queue) - len(remaining)
+        if not num_abort_req:
+            return
+        logger.info(
+            "Aborting %d request(s) waiting longer than %.2fs.",
+            num_abort_req,
+            timeout_s,
+        )
+        self.waiting_queue = remaining
+
     def handle_embedding_request(
         self,
         recv_req: TokenizedEmbeddingReqInput,
@@ -1790,6 +1821,8 @@ class Scheduler(
         if adder.preempt_list:
             for req in adder.preempt_list:
                 self._add_request_to_queue(req)
+        else:
+            self._expire_waiting_requests()
 
         if adder.new_chunked_req is not None:
             assert self.chunked_req is None
