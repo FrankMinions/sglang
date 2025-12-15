@@ -204,14 +204,19 @@ class NSAIndexerMetadata(BaseIndexerMetadata):
             return fast_topk_v2(logits, seq_lens_topk, topk, row_starts=ks)
         elif self.topk_transform_method == TopkTransformMethod.PAGED:
             # NOTE(dark): if fused, we return a transformed page table directly
-            return fast_topk_transform_fused(
-                score=logits,
-                lengths=seq_lens_topk,
-                page_table_size_1=page_table_size_1,
-                cu_seqlens_q=cu_seqlens_q_topk,
-                topk=topk,
-                row_starts=ks,
-            )
+            if cu_seqlens_q_topk is not None:
+                prefill_bs = cu_seqlens_q_topk.size(0) - 1
+                B = logits.size(0)
+                if prefill_bs <= B:
+                    return fast_topk_transform_fused(
+                        score=logits,
+                        lengths=seq_lens_topk,
+                        page_table_size_1=page_table_size_1,
+                        cu_seqlens_q=cu_seqlens_q_topk,
+                        topk=topk,
+                        row_starts=ks,
+                    )
+            return fast_topk_v2(logits, seq_lens_topk, topk, row_starts=ks)
         elif self.topk_transform_method == TopkTransformMethod.RAGGED:
             return fast_topk_transform_ragged_fused(
                 score=logits,
