@@ -691,11 +691,6 @@ class ServerArgs:
         if self.mm_process_config is None:
             self.mm_process_config = {}
 
-        if self.max_wait_time_s is None:
-            env_sched_timeout = envs.SGLANG_SCHEDULER_MAX_WAIT_TIME_S.get()
-            if env_sched_timeout is not None and env_sched_timeout > 0:
-                self.max_wait_time_s = env_sched_timeout
-
         if self.max_wait_time_s is not None and self.max_wait_time_s <= 0:
             self.max_wait_time_s = None
 
@@ -2236,6 +2231,12 @@ class ServerArgs:
             type=int,
             default=ServerArgs.max_queued_requests,
             help="The maximum number of queued requests. This option is ignored when using disaggregation-mode.",
+        )
+        parser.add_argument(
+            "--max-wait-time-s",
+            type=float,
+            default=ServerArgs.max_wait_time_s,
+            help="The maximum wait time in seconds for requests in the scheduler queue. This option is ignored by default.",
         )
         parser.add_argument(
             "--max-total-tokens",
