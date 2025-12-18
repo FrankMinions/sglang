@@ -474,6 +474,13 @@ impl StepExecutor for UpdateExternalPoliciesStep {
             app_context
                 .policy_registry
                 .on_worker_added(&model_id, policy_hint);
+
+            let model_workers = app_context
+                .worker_registry
+                .get_by_model_fast(&model_id);
+            app_context
+                .policy_registry
+                .init_bucket_policy(&model_id, &model_workers);
         }
 
         debug!(

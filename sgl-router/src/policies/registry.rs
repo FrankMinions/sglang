@@ -332,6 +332,29 @@ impl PolicyRegistry {
         }
     }
 
+    /// Initialize bucket policy with workers if applicable (regular mode)
+    /// This is analogous to `init_pd_bucket_policies`, but operates on a single model's
+    /// worker set and is used for non-PD (regular) deployments where the main policy is
+    /// configured as `bucket`.
+    pub fn init_bucket_policy(&self, model_id: &str, workers: &[Arc<dyn Worker>]) {
+        if workers.is_empty() {
+            return;
+        }
+
+        if let Some(policy) = self.get_policy(model_id) {
+            if policy.name() == "bucket" {
+                if let Some(bucket) = policy.as_any().downcast_ref::<BucketPolicy>() {
+                    debug!(
+                        "Initializing bucket policy with {} workers for model {}",
+                        workers.len(),
+                        model_id
+                    );
+                    bucket.init_prefill_worker_urls(workers);
+                }
+            }
+        }
+    }
+
     /// Remove a worker from cache-aware policy if applicable
     /// This should be called when a worker is being removed
     pub fn remove_worker_from_cache_aware(&self, model_id: &str, worker_url: &str) {
