@@ -282,12 +282,36 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
     When sampling_seed is not None, deterministic inference will be enabled, it will sample
     with the sampling_seed of each request.
     """
-    probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+
+    batch_size, vocab_size = probs.shape
+
+    # If top_k is `-1`, it means `TOP_K_ALL` (whole vocabulary)
+    # For simplicity, we set all values ​​in the top_ks of a batch that are `-1` to `vocab_size`.
+    top_ks_eff = top_ks.clone()
+    topk_all_mask = top_ks_eff == TOP_K_ALL
+    if torch.any(topk_all_mask):
+        top_ks_eff.masked_fill_(topk_all_mask, vocab_size)
+
+    max_top_k = int(top_ks_eff.max().item())
+
+    if max_top_k >= vocab_size:
+        # Fallback to the original full-sort behavior when we effectively need
+        # the whole vocabulary (TOP_K_ALL or very large top-k).
+        probs_sort, probs_idx = probs.sort(dim=-1, descending=True)
+    else:
+        # Use topk over vocab dimension, already sorted in descending order.
+        # Shape: [batch_size, max_top_k]
+        probs_sort, probs_idx = torch.topk(
+            probs, k=max_top_k, dim=-1, largest=True, sorted=True
+        )
+
     probs_sum = torch.cumsum(probs_sort, dim=-1)
-    probs_sort[
-        torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1)
-        >= top_ks.view(-1, 1)
-    ] = 0.0
+
+     # Apply per-row top-k mask within the (possibly reduced) candidate set.
+    # Tokens beyond each row's top_k are zeroed out.
+    arange_k = torch.arange(0, probs_sort.shape[-1], device=probs.device).view(1, -1)
+    probs_sort[arange_k >= top_ks_eff.view(-1, 1)] = 0.0
+
     probs_sort[(probs_sum - probs_sort) > top_ps.view(-1, 1)] = 0.0
 
     if need_min_p_sampling:
