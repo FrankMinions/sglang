@@ -297,17 +297,16 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
                 batch_size, dtype=torch.int32, device=probs.device
             )
 
-            if torch.any(no_filter_mask):
-                probs_nf = probs[no_filter_mask]
-                if sampling_seed is not None:
-                    seed_nf = sampling_seed[no_filter_mask]
-                    pos_nf = positions[no_filter_mask]
-                    sampled_nf = multinomial_with_seed(probs_nf, seed_nf, pos_nf)
-                else:
-                    sampled_nf = torch.multinomial(probs_nf, num_samples=1)
-                batch_next_token_ids[no_filter_mask] = (
-                    sampled_nf.view(-1).to(torch.int32)
-                )
+            probs_nf = probs[no_filter_mask]
+            if sampling_seed is not None:
+                seed_nf = sampling_seed[no_filter_mask]
+                pos_nf = positions[no_filter_mask]
+                sampled_nf = multinomial_with_seed(probs_nf, seed_nf, pos_nf)
+            else:
+                sampled_nf = torch.multinomial(probs_nf, num_samples=1)
+            batch_next_token_ids[no_filter_mask] = (
+                sampled_nf.view(-1).to(torch.int32)
+            )
 
             filter_mask = ~no_filter_mask
             if torch.any(filter_mask):
