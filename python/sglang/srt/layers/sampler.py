@@ -292,6 +292,18 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
     if torch.any(topk_all_mask):
         top_ks_eff.masked_fill_(topk_all_mask, vocab_size)
 
+    # If top_p is `1.0` and top_k is `-1`, it does not need to compute top-k and top-p.
+    if (
+        not need_min_p_sampling
+        and torch.all(top_ps == 1.0)
+        and torch.all(top_ks_eff >= vocab_size)
+    ):
+        if sampling_seed is not None:
+            sampled_index = multinomial_with_seed(probs, sampling_seed, positions)
+        else:
+            sampled_index = torch.multinomial(probs, num_samples=1)
+        return sampled_index.view(-1).to(torch.int32)
+
     max_top_k = int(top_ks_eff.max().item())
 
     if max_top_k >= vocab_size:
