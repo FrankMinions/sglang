@@ -285,24 +285,52 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
 
     batch_size, vocab_size = probs.shape
 
-    # If top_k is `-1`, it means `TOP_K_ALL` (whole vocabulary)
-    # For simplicity, we set all values ​​in the top_ks of a batch that are `-1` to `vocab_size`.
     top_ks_eff = top_ks.clone()
     topk_all_mask = top_ks_eff == TOP_K_ALL
     if torch.any(topk_all_mask):
         top_ks_eff.masked_fill_(topk_all_mask, vocab_size)
 
-    # If top_p is `1.0` and top_k is `-1`, it does not need to compute top-k and top-p.
-    if (
-        not need_min_p_sampling
-        and torch.all(top_ps == 1.0)
-        and torch.all(top_ks_eff >= vocab_size)
-    ):
-        if sampling_seed is not None:
-            sampled_index = multinomial_with_seed(probs, sampling_seed, positions)
-        else:
-            sampled_index = torch.multinomial(probs, num_samples=1)
-        return sampled_index.view(-1).to(torch.int32)
+    if not need_min_p_sampling:
+        no_filter_mask = (top_ps == 1.0) & (top_ks_eff >= vocab_size)
+        if torch.any(no_filter_mask):
+            batch_next_token_ids = torch.empty(
+                batch_size, dtype=torch.int32, device=probs.device
+            )
+
+            if torch.any(no_filter_mask):
+                probs_nf = probs[no_filter_mask]
+                if sampling_seed is not None:
+                    seed_nf = sampling_seed[no_filter_mask]
+                    pos_nf = positions[no_filter_mask]
+                    sampled_nf = multinomial_with_seed(probs_nf, seed_nf, pos_nf)
+                else:
+                    sampled_nf = torch.multinomial(probs_nf, num_samples=1)
+                batch_next_token_ids[no_filter_mask] = (
+                    sampled_nf.view(-1).to(torch.int32)
+                )
+
+            filter_mask = ~no_filter_mask
+            if torch.any(filter_mask):
+                idx = torch.nonzero(filter_mask, as_tuple=False).view(-1)
+                probs_f = probs[idx]
+                top_ks_f = top_ks[idx]
+                top_ps_f = top_ps[idx]
+                min_ps_f = min_ps[idx]
+                seed_f = sampling_seed[idx] if sampling_seed is not None else None
+                pos_f = positions[idx]
+
+                tokens_f = top_k_top_p_min_p_sampling_from_probs_torch(
+                    probs_f,
+                    top_ks_f,
+                    top_ps_f,
+                    min_ps_f,
+                    need_min_p_sampling,
+                    seed_f,
+                    pos_f,
+                )
+                batch_next_token_ids[idx] = tokens_f
+
+            return batch_next_token_ids
 
     max_top_k = int(top_ks_eff.max().item())
 
@@ -319,11 +347,12 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
 
     probs_sum = torch.cumsum(probs_sort, dim=-1)
 
-     # Apply per-row top-k mask within the (possibly reduced) candidate set.
+    # Apply per-row top-k mask within the (possibly reduced) candidate set.
     # Tokens beyond each row's top_k are zeroed out.
     arange_k = torch.arange(0, probs_sort.shape[-1], device=probs.device).view(1, -1)
     probs_sort[arange_k >= top_ks_eff.view(-1, 1)] = 0.0
 
+    # Apply top-p (nucleus) filtering on the sorted candidates.
     probs_sort[(probs_sum - probs_sort) > top_ps.view(-1, 1)] = 0.0
 
     if need_min_p_sampling:
