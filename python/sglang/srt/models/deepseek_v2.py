@@ -47,6 +47,7 @@ from sglang.srt.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
+    get_tensor_model_parallel_rank,
 )
 from sglang.srt.environ import envs
 from sglang.srt.eplb.expert_distribution import get_global_expert_distribution_recorder
@@ -873,6 +874,15 @@ class DeepseekV2MoE(nn.Module):
         else:
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
+
+        # # tunning fused_moe_triton kernel
+        # if hidden_states.shape[0] == 16384 and get_tensor_model_parallel_rank() == 0:
+        #     topk_ids_dir = "/opt"
+        #     if not hasattr(self, "save_idx"):
+        #         self.save_idx = 0
+        #     if self.save_idx <= 1:
+        #         torch.save(topk_output.topk_ids, f"{topk_ids_dir}/topk_ids_layer{self.layer_id}_idx{self.save_idx}.pt")
+        #     self.save_idx += 1
 
         if self._fuse_shared_experts_inside_sbo:
             shared_output = None
