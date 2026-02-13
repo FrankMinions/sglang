@@ -875,7 +875,7 @@ class DeepseekV2MoE(nn.Module):
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
-        # # tunning fused_moe_triton kernel
+        # # tunning fused_moe_triton kernel, and need to set `--chunked-prefill-size 16384` first
         # if hidden_states.shape[0] == 16384 and get_tensor_model_parallel_rank() == 0:
         #     topk_ids_dir = "/opt"
         #     if not hasattr(self, "save_idx"):
