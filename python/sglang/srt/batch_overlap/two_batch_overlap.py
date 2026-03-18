@@ -417,7 +417,7 @@ class TboDPAttentionPreparer:
         return local_can_run_tbo, local_forward_mode
 
     def compute_output(self, partial_global_info):
-        # avoid D2H memory copy and `tolist()` operation for creating a new list object
+        # Avoids D2H copy and `tolist()` allocation.
         local_can_run_tbo_aggregated = bool(partial_global_info[:, 0].min().item())
         forward_modes = partial_global_info[:, 1].tolist()
 
