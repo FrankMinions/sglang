@@ -93,11 +93,10 @@ class MLPSyncBatchInfo:
         tp_info[tp_active_ranks == 0] = self._get_fallback_tensor(device=device)
 
         tp0_info = global_info_tensor[:, 0, :]
-        self.tp0_info = tp0_info
         # Perform only one Device-to-Host (D2H) memory copy
-        cpu_data = tp0_info[:, :2].cpu()
-        self.global_num_tokens = cpu_data[:, 0].tolist()
-        self.global_num_tokens_for_logprob = cpu_data[:, 1].tolist()
+        self.tp0_info = tp0_info.cpu()
+        self.global_num_tokens = self.tp0_info[:, 0].tolist()
+        self.global_num_tokens_for_logprob = self.tp0_info[:, 1].tolist()
         self.can_cuda_graph = bool(tp0_info[:, 2].min().item())
         self.is_extend_in_batch = bool(tp0_info[:, 3].max().item())
         if _ENABLE_METRICS_DP_ATTENTION:
