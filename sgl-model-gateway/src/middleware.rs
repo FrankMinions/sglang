@@ -342,22 +342,27 @@ impl<B> OnResponse<B> for ResponseLogger {
         span.record("status_code", status_code);
         // Use microseconds as integer to avoid format! string allocation
         span.record("latency", latency.as_micros() as u64);
+        // Also record a human-readable latency in seconds.
+        let latency_s = latency.as_secs_f64();
 
         // Log the response completion
         let _enter = span.enter();
         if status.is_server_error() {
             error!(
                 target: "smg::response",
+                latency_s = latency_s,
                 "request failed with server error"
             );
         } else if status.is_client_error() {
             warn!(
                 target: "smg::response",
+                latency_s = latency_s,
                 "request failed with client error"
             );
         } else {
             info!(
                 target: "smg::response",
+                latency_s = latency_s,
                 "finished processing request"
             );
         }
