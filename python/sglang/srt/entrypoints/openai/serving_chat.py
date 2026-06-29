@@ -40,6 +40,7 @@ from sglang.srt.entrypoints.openai.protocol import (
     MessageProcessingResult,
     ResponseParserProtocol,
     SglExt,
+    Tool,
     ToolCall,
     ToolCallProcessingResult,
     ToolChoice,
@@ -113,6 +114,51 @@ def parse_tool_call_arguments(arguments: str) -> Dict[str, Any]:
         )
 
     return parsed_arguments
+
+
+def normalize_assistant_tool_call_names(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Tool]] = None,
+) -> None:
+    """Fill missing assistant history tool call names in-place."""
+    id_to_name: Dict[str, str] = {}
+    for message in messages:
+        if message.get("role") != "assistant" or not isinstance(
+            message.get("tool_calls"), list
+        ):
+            continue
+        for item in message["tool_calls"]:
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = function.get("name")
+            tool_id = item.get("id")
+            if name and tool_id:
+                id_to_name[tool_id] = name
+
+    default_name = None
+    if tools and len(tools) == 1:
+        default_name = tools[0].function.name
+
+    for message in messages:
+        if message.get("role") != "assistant" or not isinstance(
+            message.get("tool_calls"), list
+        ):
+            continue
+        for item in message["tool_calls"]:
+            if not isinstance(item, dict):
+                continue
+            function = item.get("function")
+            if not isinstance(function, dict) or function.get("name"):
+                continue
+            tool_id = item.get("id")
+            name = id_to_name.get(tool_id) if tool_id else None
+            if name is None:
+                name = default_name
+            if name:
+                function["name"] = name
 
 
 def normalize_assistant_tool_call_arguments(message: Dict[str, Any]) -> None:
@@ -717,6 +763,7 @@ class OpenAIServingChat(OpenAIServingBase):
             ThinkingMode.THINKING if thinking_requested else ThinkingMode.CHAT
         )
         messages = [msg.model_dump() for msg in request.messages]
+        normalize_assistant_tool_call_names(messages, request.tools)
         for message in messages:
             normalize_assistant_tool_call_arguments(message)
 
