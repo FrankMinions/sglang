@@ -25,6 +25,7 @@ from sglang.srt.layers.moe.utils import (
     DispatcherOutputDtype,
     get_deepep_config,
     get_deepep_output_dtype,
+    get_moe_runner_backend,
     is_tbo_enabled,
 )
 from sglang.srt.utils import (
@@ -508,14 +509,21 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
     ):
         topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
         topk_ids = topk_ids.to(torch.int64)
-        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM and self.use_fp8:
+        if self.use_fp8 and (
+            deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            or get_moe_runner_backend().is_humming()
+        ):
+            use_ue8m0 = (
+                deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0
+                and not get_moe_runner_backend().is_humming()
+            )
             # TODO hard code 128 block quant,use fp8 communication
             hidden_states = sglang_per_token_group_quant_fp8(
                 hidden_states,
                 128,
-                column_major_scales=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
-                scale_tma_aligned=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
-                scale_ue8m0=deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0,
+                column_major_scales=use_ue8m0,
+                scale_tma_aligned=use_ue8m0,
+                scale_ue8m0=use_ue8m0,
             )
         previous_event = Buffer.capture() if self.async_finish else None
         return hidden_states, topk_ids, topk_weights, previous_event
@@ -731,15 +739,19 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
     ):
         input_global_scale = self.quant_config.get("input_global_scale", None)
 
+        use_deepgemm_ue8m0 = (
+            deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            and deep_gemm_wrapper.DEEPGEMM_BLACKWELL
+            and not get_moe_runner_backend().is_humming()
+        )
+
         # round_scale / use_ue8m0 are FP8-DeepGEMM specific; they cause DeepEP
         # to return int32-packed UE8M0 scales that don't feed the flashinfer
         # cutedsl kernel.
         fp8_deepgemm_scale_opts = (
             dict(
-                round_scale=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
-                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
-                use_ue8m0=deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
-                and deep_gemm_wrapper.DEEPGEMM_BLACKWELL,
+                round_scale=use_deepgemm_ue8m0,
+                use_ue8m0=use_deepgemm_ue8m0,
             )
             if self.use_fp8
             else dict()

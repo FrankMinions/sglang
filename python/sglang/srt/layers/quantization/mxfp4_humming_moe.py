@@ -90,6 +90,9 @@ class Mxfp4HummingMoEMethod:
         prepare_humming_moe_layer(layer, {"quant_method": "mxfp4"})
         layer._dsv4_mxfp4_backend = "humming"
 
+        if hasattr(layer, "dispatcher"):
+            layer.dispatcher.set_quant_config({"dispatcher_output_dtype": "fp8"})
+
     def apply(
         self,
         layer: Module,

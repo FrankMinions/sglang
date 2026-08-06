@@ -2,6 +2,7 @@ from typing import Any
 
 import regex as re
 import torch
+from humming import dtypes
 from humming.layer import HummingInputSchema, HummingMethod
 from humming.schema import BaseWeightSchema
 
@@ -79,7 +80,11 @@ def prepare_humming_moe_layer(layer: FusedMoE, quant_config: dict):
     weight_schema = BaseWeightSchema.from_config(quant_config)
     input_quant_config = envs.SGLANG_HUMMING_INPUT_QUANT_CONFIG.get() or {}
     if humming_is_layer_skipped(input_quant_config, layer.layer_name):
-        input_schema = HummingInputSchema()
+        input_schema = HummingInputSchema(
+            a_dtype=dtypes.float8e4m3,
+            input_scale_group_size=128,
+            input_scale_dtype=dtypes.float32,
+        )
     else:
         # TODO: read input_quant_config from quant_config
         input_schema = HummingInputSchema.from_config(input_quant_config)

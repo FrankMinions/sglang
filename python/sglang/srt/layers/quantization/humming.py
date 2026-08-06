@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 
 
 DataType = None
+HummingDtypes = None
 HummingMethod = None
 BaseInputSchema = None
 BaseWeightSchema = None
@@ -52,13 +53,14 @@ quantize_weight = None
 
 
 def _lazy_import_humming():
-    global DataType, HummingMethod, BaseInputSchema, BaseWeightSchema
+    global HummingDtypes, DataType, HummingMethod, BaseInputSchema, BaseWeightSchema
     global HummingInputSchema, HummingWeightSchema, quantize_weight
 
     if HummingMethod is not None:
         return
 
     try:
+        from humming import dtypes as _HummingDtypes
         from humming.dtypes import DataType as _DataType
         from humming.layer import HummingMethod as _HummingMethod
         from humming.schema import BaseInputSchema as _BaseInputSchema
@@ -80,6 +82,7 @@ def _lazy_import_humming():
         raise ImportError(message) from err
 
     DataType = _DataType
+    HummingDtypes = _HummingDtypes
     HummingMethod = _HummingMethod
     BaseInputSchema = _BaseInputSchema
     BaseWeightSchema = _BaseWeightSchema
@@ -869,6 +872,14 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
                 del tensors
 
+            if getattr(input_schema, "a_dtype", None) == HummingDtypes.float8e4m3:
+                input_schema = HummingInputSchema(
+                    a_dtype=HummingDtypes.float8e4m3,
+                    input_scale_group_size=128,
+                    input_scale_dtype=HummingDtypes.float32,
+                )
+                self.input_schemas[sublayer_name] = input_schema
+
             # prepare layer config from humming kernel
             HummingMethod.prepare_layer_meta(
                 layer=layer,
@@ -888,7 +899,19 @@ class HummingMoEMethod(FusedMoEMethodBase):
             HummingMethod.transform_humming_layer(layer, sublayer_name=sublayer_name)
 
         if hasattr(layer, "dispatcher"):
-            layer.dispatcher.set_quant_config({"dispatcher_output_dtype": "bf16"})
+
+            # DeepEP FP8 only when GEMM expects FP8 act (w13 receives dispatch output).
+            use_fp8_dispatch = any(
+                getattr(schema, "a_dtype", None) == HummingDtypes.float8e4m3
+                for schema in self.input_schemas.values()
+            )
+            layer.dispatcher.set_quant_config(
+                {
+                    "dispatcher_output_dtype": (
+                        "fp8" if use_fp8_dispatch else "bf16"
+                    )
+                }
+            )
 
     def create_moe_runner(
         self,
