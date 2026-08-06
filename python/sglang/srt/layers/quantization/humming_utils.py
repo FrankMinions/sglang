@@ -79,12 +79,15 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
 def prepare_humming_moe_layer(layer: FusedMoE, quant_config: dict):
     weight_schema = BaseWeightSchema.from_config(quant_config)
     input_quant_config = envs.SGLANG_HUMMING_INPUT_QUANT_CONFIG.get() or {}
-    if humming_is_layer_skipped(input_quant_config, layer.layer_name):
+    if not input_quant_config:
+        # Default MoE path (e.g. mxfp4): FP8 act to match DeepEP FP8 dispatch.
         input_schema = HummingInputSchema(
             a_dtype=dtypes.float8e4m3,
             input_scale_group_size=128,
             input_scale_dtype=dtypes.float32,
         )
+    elif humming_is_layer_skipped(input_quant_config, layer.layer_name):
+        input_schema = HummingInputSchema()
     else:
         # TODO: read input_quant_config from quant_config
         input_schema = HummingInputSchema.from_config(input_quant_config)

@@ -900,10 +900,10 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         if hasattr(layer, "dispatcher"):
 
-            # DeepEP FP8 only when GEMM expects FP8 act (w13 receives dispatch output).
-            use_fp8_dispatch = any(
-                getattr(schema, "a_dtype", None) == HummingDtypes.float8e4m3
-                for schema in self.input_schemas.values()
+            # DeepEP FP8 only when w13 GEMM expects FP8 act (w13 receives dispatch output).
+            w13_schema = self.input_schemas.get("w13")
+            use_fp8_dispatch = (
+                getattr(w13_schema, "a_dtype", None) == HummingDtypes.float8e4m3
             )
             layer.dispatcher.set_quant_config(
                 {
