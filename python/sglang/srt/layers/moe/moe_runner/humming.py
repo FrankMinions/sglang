@@ -43,12 +43,50 @@ logger = logging.getLogger(__name__)
 
 try:
     from humming import dtypes
+    from humming import ops as humming_ops
     from humming.config import GemmType as HummingGemmType
     from humming.layer import HummingMethod
 
     _humming_available = True
 except ModuleNotFoundError:
     _humming_available = False
+
+
+def _humming_may_quant_input(
+    layer: torch.nn.Module,
+    inputs: torch.Tensor,
+    input_scale: torch.Tensor | None = None,
+    quanted_input: torch.Tensor | None = None,
+    sublayer_name: str = "",
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Quantize MoE activations for Humming GEMM with row-major scales.
+
+    ``HummingMethod.may_quant_input`` forces ``m_major_scale=True`` when
+    ``mma_type`` is MXMMA (e.g. mxfp4 weights). Our MoE ``compute_config`` and
+    DeepEP FP8 dispatch scales are row-major ``(M, K/group)``, so online quant
+    must match that layout; otherwise w2 GEMM fails with
+    ``as.size(1) != expected_shape[1]`` (e.g. ``1 != 16`` when M==1).
+    """
+    if input_scale is not None:
+        # Pre-quantized DeepEP FP8: keep row-major and make contiguous for
+        # Humming's vectorized scale loads (non-contig → CUDA misaligned address).
+        if input_scale.ndim > 2:
+            input_scale = input_scale.reshape(-1, input_scale.size(-1))
+        return inputs.contiguous(), input_scale.contiguous()
+
+    meta = layer.humming_metas[sublayer_name]
+    if meta.a_dtype.num_bits == 16:
+        return inputs, None
+
+    assert meta.as_dtype is not None
+    return humming_ops.quant_input(
+        inputs=inputs,
+        outputs=quanted_input,
+        dtype=str(meta.a_dtype),
+        group_size=meta.input_scale_group_size or None,
+        m_major_scale=False,
+        scale_dtype=str(meta.as_dtype),
+    )
 
 
 def get_standard_humming_moe_gemm_type() -> HummingGemmType:
@@ -164,6 +202,7 @@ class HummingRunnerCore(MoeRunnerCore):
         compute_config = {
             "use_f16_accum": envs.SGLANG_HUMMING_USE_F16_ACCUM.get(),
             "gemm_type": humming_gemm_type.value,
+            "use_m_major_input_scale": False,
         }
         w13_tuning_config = HummingMethod.get_default_tuning_configs(
             layer=self.layer,
@@ -489,7 +528,11 @@ class HummingRunnerCore(MoeRunnerCore):
         apply_routed_scaling_factor: bool = True,
         hidden_states_scale: torch.Tensor | None = None,
     ):
-        hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+        hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
+        if hidden_states_scale is not None:
+            hidden_states_scale = hidden_states_scale.reshape(
+                -1, hidden_states_scale.size(-1)
+            )
         buffers = self.prepare_buffers(
             hidden_states=hidden_states,
             topk_ids=topk_ids,
@@ -498,7 +541,7 @@ class HummingRunnerCore(MoeRunnerCore):
 
         moe_kwargs1, moe_kwargs2 = self._prepare_indexed_gemm_kwargs(topk_ids)
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = _humming_may_quant_input(
             layer=self.layer,
             inputs=hidden_states,
             input_scale=hidden_states_scale,
@@ -520,7 +563,7 @@ class HummingRunnerCore(MoeRunnerCore):
             outputs=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = _humming_may_quant_input(
             layer=self.layer,
             inputs=buffers["activation_output"],
             quanted_input=buffers.get("quanted_down_input", None),
@@ -582,7 +625,7 @@ class HummingRunnerCore(MoeRunnerCore):
                 is_ep=self.num_experts != self.global_num_experts,
             )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = _humming_may_quant_input(
             layer=self.layer,
             inputs=hidden_states,
             input_scale=hidden_states_scale,
@@ -607,7 +650,7 @@ class HummingRunnerCore(MoeRunnerCore):
             outputs=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = _humming_may_quant_input(
             layer=self.layer,
             inputs=buffers["activation_output"],
             quanted_input=buffers.get("quanted_down_input", None),
@@ -651,9 +694,9 @@ class HummingRunnerCore(MoeRunnerCore):
     ):
         configs = self.get_humming_gemm_configs(HummingGemmType.GROUPED_MASKED)
         valid_shape_m = self.estimate_local_valid_shape_m(topk_ids, expected_m)
-        hidden_states = hidden_states.view(-1, hidden_states.size(-1))
+        hidden_states = hidden_states.reshape(-1, hidden_states.size(-1))
         if hidden_states_scale is not None:
-            hidden_states_scale = hidden_states_scale.view(
+            hidden_states_scale = hidden_states_scale.reshape(
                 -1, hidden_states_scale.size(-1)
             )
 
@@ -663,7 +706,7 @@ class HummingRunnerCore(MoeRunnerCore):
             gemm_type=HummingGemmType.GROUPED_MASKED,
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = _humming_may_quant_input(
             layer=self.layer,
             inputs=hidden_states,
             input_scale=hidden_states_scale,
@@ -688,7 +731,7 @@ class HummingRunnerCore(MoeRunnerCore):
             outputs=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = _humming_may_quant_input(
             layer=self.layer,
             inputs=buffers["activation_output"],
             quanted_input=buffers.get("quanted_down_input", None),
