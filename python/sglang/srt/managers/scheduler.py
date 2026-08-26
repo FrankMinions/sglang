@@ -1738,13 +1738,22 @@ class Scheduler(
         self.session_controller.maybe_reap(now)
         for recv_req in recv_reqs:
             # Skip health check when server is busy — ongoing requests already carry health info.
-            if is_health_check_generate_req(recv_req) and not self.is_fully_idle(
-                for_health_check=True
-            ):
-                self.return_health_check_ipcs.append(
-                    getattr(recv_req, "http_worker_ipc", None)
+            if is_health_check_generate_req(recv_req):
+                skip = getattr(
+                    recv_req,
+                    "is_skipped_health_check",
+                    not self.is_fully_idle(for_health_check=True),
                 )
-                continue
+                if skip:
+                    if (
+                        self.ps.pp_rank == 0
+                        and self.ps.attn_tp_rank == 0
+                        and self.ps.attn_cp_rank == 0
+                    ):
+                        self.return_health_check_ipcs.append(
+                            getattr(recv_req, "http_worker_ipc", None)
+                        )
+                    continue
 
             output = self._request_dispatcher(recv_req)
             if output is not None:
@@ -1828,6 +1837,7 @@ class Scheduler(
             max_recv_per_poll=self.max_recv_per_poll,
             stream_output=lambda *a, **kw: self.output_streamer.stream_output(*a, **kw),
             get_last_batch=lambda: self.last_batch,
+            is_fully_idle=self.is_fully_idle,
             scripted_scheduler_hook=self.scripted_scheduler_hook,
         )
 

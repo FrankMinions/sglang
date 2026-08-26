@@ -76,6 +76,7 @@ class BaseReq(msgspec.Struct, tag=True, kw_only=True, array_like=True):
 
     rid: Optional[str] = None
     http_worker_ipc: Optional[str] = None
+    is_skipped_health_check: bool = False
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source, handler):
@@ -90,6 +91,7 @@ class BaseBatchReq(msgspec.Struct, tag=True, kw_only=True, array_like=True):
     # outputs. Tokenized input batches store routing on batch[i].http_worker_ipc
     # because the scheduler unpacks them into single-request handlers.
     http_worker_ipcs: Optional[List[Optional[str]]] = None
+    is_skipped_health_check: bool = False
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source, handler):

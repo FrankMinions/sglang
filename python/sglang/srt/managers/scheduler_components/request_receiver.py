@@ -26,6 +26,7 @@ from sglang.srt.managers.mm_utils import (
     has_shm_features,
     unwrap_shm_features,
 )
+from sglang.srt.managers.utils import is_health_check_generate_req
 from sglang.srt.utils import (
     broadcast_pyobj,
     point_to_point_pyobj,
@@ -62,6 +63,7 @@ class SchedulerRequestReceiver:
     max_recv_per_poll: int
     stream_output: Callable[..., None]
     get_last_batch: Callable[[], Any]
+    is_fully_idle: Optional[Callable[..., bool]] = None
     scripted_scheduler_hook: Optional[ScriptedSchedulerHook] = None
 
     def recv_limit_reached(self, num_recv_reqs: int) -> bool:
@@ -86,6 +88,12 @@ class SchedulerRequestReceiver:
 
         if self.input_blocker is not None:
             recv_reqs = self.input_blocker.handle(recv_reqs)
+
+        if self.is_fully_idle is not None and recv_reqs is not None:
+            is_idle = self.is_fully_idle(for_health_check=True)
+            for req in recv_reqs:
+                if is_health_check_generate_req(req):
+                    req.is_skipped_health_check = not is_idle
 
         recv_reqs = self._broadcast_reqs_across_ranks(recv_reqs)
 
