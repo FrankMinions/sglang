@@ -3980,13 +3980,15 @@ class Scheduler(
                     if kv_full_retract_flag
                     else "Testing retraction. "
                 )
+                count_label, req_count = "aborted_reqs", len(reqs_to_abort)
             else:
                 msg_prefix = (
                     "KV cache pool is full. Retract requests. "
                     if kv_full_retract_flag
                     else "Testing retraction. "
                 )
-            msg_details = f"#retracted_reqs: {len(retracted_reqs)}, #new_tokens_gained: {new_token_gained}"
+                count_label, req_count = "retracted_reqs", len(retracted_reqs)
+            msg_details = f"#{count_label}: {req_count}, #new_tokens_gained: {new_token_gained}"
             if mamba_num_gained is not None:
                 msg_details += f", #mamba_num_gained: {mamba_num_gained}"
             if kv_full_retract_flag:
