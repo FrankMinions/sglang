@@ -3978,7 +3978,7 @@ class Scheduler(
                 msg_prefix = (
                     "KV cache pool is full. Aborting requests. "
                     if kv_full_retract_flag
-                    else "Testing retraction (abort on decode). "
+                    else "Testing retraction. "
                 )
             else:
                 msg_prefix = (
