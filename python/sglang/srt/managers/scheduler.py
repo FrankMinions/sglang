@@ -3923,7 +3923,13 @@ class Scheduler(
                 if mamba_allocator is not None
                 else None
             )
-            retracted_reqs, new_token_ratio, reqs_to_abort = batch.retract_decode()
+            abort_retracted = (
+                self.disaggregation_mode == DisaggregationMode.DECODE
+                and envs.SGLANG_DISAGGREGATION_ABORT_DECODE_KV_FULL.get()
+            )
+            retracted_reqs, new_token_ratio, reqs_to_abort = batch.retract_decode(
+                offload_kv=not abort_retracted
+            )
             new_available_tokens = self.token_to_kv_pool_allocator.available_size()
             new_token_gained = new_available_tokens - old_available_tokens
             mamba_num_gained = (
@@ -3944,6 +3950,19 @@ class Scheduler(
                     ),
                 )
             self.new_token_ratio_tracker.current = new_token_ratio
+
+            if abort_retracted:
+                abort_msg = (
+                    "KV cache pool is full. Aborting requests. "
+                )
+                for req in retracted_reqs:
+                    if req.to_finish is None:
+                        req.to_finish = FINISH_ABORT(
+                            abort_msg,
+                            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                        )
+                    reqs_to_abort.append(req)
+
             for req in reqs_to_abort:
                 abort_reason: FINISH_ABORT = req.to_finish
                 self.ipc_channels.send_to_tokenizer.send_output(
@@ -3955,11 +3974,18 @@ class Scheduler(
                 # has to leave the live set.
                 self.beam_coordinator.retire_group(req)
 
-            msg_prefix = (
-                "KV cache pool is full. Retract requests. "
-                if kv_full_retract_flag
-                else "Testing retraction. "
-            )
+            if abort_retracted:
+                msg_prefix = (
+                    "KV cache pool is full. Aborting requests. "
+                    if kv_full_retract_flag
+                    else "Testing retraction (abort on decode). "
+                )
+            else:
+                msg_prefix = (
+                    "KV cache pool is full. Retract requests. "
+                    if kv_full_retract_flag
+                    else "Testing retraction. "
+                )
             msg_details = f"#retracted_reqs: {len(retracted_reqs)}, #new_tokens_gained: {new_token_gained}"
             if mamba_num_gained is not None:
                 msg_details += f", #mamba_num_gained: {mamba_num_gained}"
@@ -3969,8 +3995,9 @@ class Scheduler(
                 )
             logger.warning(msg_prefix + msg_details)
 
-            for req in retracted_reqs:
-                self._add_request_to_queue(req, is_retracted=True)
+            if not abort_retracted:
+                for req in retracted_reqs:
+                    self._add_request_to_queue(req, is_retracted=True)
         else:
             self.new_token_ratio_tracker.decay_step()
 

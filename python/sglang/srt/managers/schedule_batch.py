@@ -3026,7 +3026,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             num_tokens=num_tokens, tree_cache=self.tree_cache
         )
 
-    def retract_decode(self) -> Tuple[List[Req], float, List[Req]]:
+    def retract_decode(self, offload_kv: bool = True) -> Tuple[List[Req], float, List[Req]]:
         """Retract the decoding requests when there is not enough memory."""
         sorted_indices = self._get_decode_retraction_order(self.reqs)
         sorted_indices = beam_retraction_order(sorted_indices, self.reqs)
@@ -3063,7 +3063,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 self.release_req(idx, len(sorted_indices), offload_kv=False)
                 continue
             # release memory and don't insert into the tree because we need the space instantly
-            if self.release_req(idx, len(sorted_indices)):
+            if self.release_req(idx, len(sorted_indices), offload_kv=offload_kv):
                 retracted_reqs.append(req)
             else:
                 # The retraction host pool could not hold the backup and the
