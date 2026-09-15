@@ -16,6 +16,7 @@ from sglang.srt.layers.attention.dsa.utils import (
 )
 from sglang.srt.utils import is_hip, is_xpu
 
+from .kv_layout import KVLayout
 from .utils import make_name
 
 _is_xpu = is_xpu()
@@ -48,29 +49,23 @@ def _jit_compress_norm_rope_module(
     head_dim: int,
     rope_dim: int,
     page_size: int,
-    bf16_store: bool = False,
-    fp8_2buff: bool = False,
+    bf16_store: bool,
+    layout: KVLayout,
 ) -> Module:
     args = make_cpp_args(
         dtype,
         head_dim,
         rope_dim,
         page_size,
-        is_arch_support_pdl(),
         INDEXER_K_CACHE_PRESHUFFLE_TILE if aiter_can_use_preshuffle_paged_mqa() else 0,
         bf16_store,
+        layout.cpp_name,
+        is_arch_support_pdl(),
     )
     cuda_wrappers = [("forward", f"FusedNormRopeKernel<{args}>::forward")]
     if head_dim == 128:
         cuda_wrappers.append(
             ("forward_fp4", f"FusedNormRopeKernel<{args}>::forward_fp4")
-        )
-    # elif because forward_fp8_2buff cannot even instantiate at head_dim 128 -- the kernel
-    # static_asserts the two-pool store is latent-only. The default latent arm skips it as
-    # well, so it doesn't carry a symbol nothing calls.
-    elif fp8_2buff:
-        cuda_wrappers.append(
-            ("forward_fp8_2buff", f"FusedNormRopeKernel<{args}>::forward_fp8_2buff")
         )
     return load_jit(
         make_name(f"fused_norm_rope_v2"),
@@ -455,9 +450,16 @@ def compress_norm_rope_store(
     kvcache_scale: Optional[torch.Tensor] = None,
     rope_cache: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
     fp4_k_write_metadata=None,
-    fp8_2buff: bool = False,
-    kvcache_rope: Optional[torch.Tensor] = None,
+    # Page layout of a FlashMLA (head_dim 512) main-KV cache: the 584-byte V4
+    # layout, or the V4.1 fp8 / fp4 formats (CUDA only).
+    layout: Union[KVLayout, str] = KVLayout.V4,
 ) -> None:
+    layout = KVLayout.parse(layout)
+    if layout is not KVLayout.V4:
+        assert kv.shape[-1] == 512 and not use_fp4 and not bf16_store, (
+            "the V4.1 layouts are paged FlashMLA main-KV caches"
+        )
+        assert not is_hip() and not _is_xpu, "the V4.1 KV layouts are CUDA (sm100) only"
     if use_fp4:
         assert kv.shape[-1] == 128
     if is_hip() and use_fp4:
@@ -480,11 +482,6 @@ def compress_norm_rope_store(
         )
         return
 
-    if fp8_2buff:
-        assert not (use_fp4 or bf16_store), "fp8 two-pool store is its own layout"
-        assert kv.shape[-1] != 128, "fp8 two-pool store is the latent, not the indexer"
-        assert kvcache_rope is not None, "fp8 two-pool store needs the rope pool"
-        assert not _is_xpu, "fp8 two-pool store is only wired for the CUDA/HIP kernel"
     freq_cis = torch.view_as_real(freq_cis).flatten(-2)
     if _is_xpu:
         compress_norm_rope_store_xpu(
@@ -502,19 +499,9 @@ def compress_norm_rope_store(
         )
     else:
         module = _jit_compress_norm_rope_module(
-            kv.dtype,
-            kv.shape[-1],
-            freq_cis.shape[-1],
-            page_size,
-            bf16_store,
-            fp8_2buff,
+            kv.dtype, kv.shape[-1], freq_cis.shape[-1], page_size, bf16_store, layout
         )
-        if use_fp4:
-            fn, extra = module.forward_fp4, ()
-        elif fp8_2buff:
-            fn, extra = module.forward_fp8_2buff, (kvcache_rope,)
-        else:
-            fn, extra = module.forward, ()
+        fn = module.forward_fp4 if use_fp4 else module.forward
         if norm_weight.dtype != kv.dtype:
             norm_weight = norm_weight.to(dtype=kv.dtype)
         fn(
@@ -525,7 +512,6 @@ def compress_norm_rope_store(
             freq_cis,
             out_loc,
             kvcache,
-            *extra,
             plan.is_decode,
             plan.compress_ratio,
         )

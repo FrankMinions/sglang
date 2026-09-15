@@ -24,7 +24,6 @@ from sglang.srt.managers.cache_controller import (
 from sglang.srt.managers.cache_controller import (
     StorageOperation as BaseStorageOperation,
 )
-from sglang.srt.mem_cache.base_prefix_cache import CacheRequestHandle
 from sglang.srt.mem_cache.hicache_storage import (
     HiCacheStorageExtraInfo,
     PoolHitPolicy,
@@ -63,14 +62,13 @@ class StorageOperation(BaseStorageOperation):
 class PrefetchOperation(StorageOperation):
     def __init__(
         self,
-        handle: CacheRequestHandle,
+        request_id: str,
         token_ids: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
         pool_transfers: Optional[list[PoolTransfer]] = None,
     ):
-        self.handle = handle
-        self.request_id = handle.rid
+        self.request_id = request_id
         self._lock = threading.Lock()
         self._terminated_flag = False
         self.storage_hit_count = 0
@@ -545,14 +543,14 @@ class HybridCacheController(BaseHiCacheController):
 
     def prefetch(
         self,
-        handle: CacheRequestHandle,
+        request_id: str,
         new_input_tokens: List[int],
         last_hash: Optional[str] = None,
         prefix_keys: Optional[List[str]] = None,
         extra_pools: Optional[list[PoolTransfer]] = None,
     ) -> PrefetchOperation:
         operation = PrefetchOperation(
-            handle,
+            request_id,
             new_input_tokens,
             last_hash,
             prefix_keys=prefix_keys,

@@ -64,6 +64,12 @@ class PoolName(str, Enum):
     INDEXER = "indexer"
     # TODO(hzh0425): Current DeepSeek V4 pool naming is verbose; will be normalized to
     # 'COMPRESSED_KV / COMPRESSED_INDEXER / COMPRESSED_STATE' in the next PR.
+    DEEPSEEK_V4_C1 = "deepseek_v4_c1"
+    DEEPSEEK_V4_C1_INDEXER = "deepseek_v4_c1_indexer"
+    DEEPSEEK_V4_C1_INDEXER_SCALE = "deepseek_v4_c1_indexer_scale"
+    DEEPSEEK_V4_C2 = "deepseek_v4_c2"
+    DEEPSEEK_V4_C2_INDEXER = "deepseek_v4_c2_indexer"
+    DEEPSEEK_V4_C2_INDEXER_SCALE = "deepseek_v4_c2_indexer_scale"
     DEEPSEEK_V4_C4 = "deepseek_v4_c4"
     DEEPSEEK_V4_C4_INDEXER = "deepseek_v4_c4_indexer"
     # FP4 indexer splits the indexer cache into separate payload/scale buffers,
@@ -533,7 +539,10 @@ class HiCacheFile(HiCacheStorage):
                 return False
             reserved = True
 
-            tmp_path = os.path.join(self.file_path, f".{uuid.uuid4().hex}.tmp")
+            tmp_path = (
+                f"{tensor_path}.tmp."
+                f"{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}"
+            )
             value.contiguous().view(dtype=torch.uint8).numpy().tofile(tmp_path)
             os.replace(tmp_path, tensor_path)
             self._evictor.commit(suffixed)

@@ -161,7 +161,7 @@ class DSV4AttnMetadata:
     swa_page_indices: torch.Tensor
     swa_topk_lengths: torch.Tensor
 
-    c4_sparse_topk: int
+    index_topk: int
     # Shared by all layer stores; locations are in SWA space.
     swa_out_cache_loc: Optional[torch.Tensor] = None
     c4_out_loc: Optional[torch.Tensor] = None
@@ -203,7 +203,7 @@ class DSV4AttnMetadata:
             src=other,
             dst=self,
             check_eq_fields=[
-                "c4_sparse_topk",
+                "index_topk",
                 "page_size",
                 "cuda_int32_kwargs",
             ],
@@ -323,22 +323,20 @@ class DSV4AttnMetadata:
             )
 
     def init_flashmla_related(self, is_prefill: bool = False):
-        # c4_sparse_topk is set from model_config.index_topk per-model
-        # (small model: 512, large model: 1024).
-        assert self.c4_sparse_topk in (512, 1024), (
-            f"unexpected c4_sparse_topk={self.c4_sparse_topk}; "
+        assert self.index_topk in (512, 1024), (
+            f"unexpected index_topk={self.index_topk}; "
             "supported: 512 (small) or 1024 (large)"
         )
         assert self.c4_topk_lengths_clamp1 is not None
         self.c4_sparse_topk_lengths = torch.clamp(
-            self.c4_topk_lengths_clamp1, max=self.c4_sparse_topk
+            self.c4_topk_lengths_clamp1, max=self.index_topk
         )
         assert self.c4_topk_lengths_raw is not None
         self.c4_sparse_topk_lengths_raw = torch.clamp(
-            self.c4_topk_lengths_raw, max=self.c4_sparse_topk
+            self.c4_topk_lengths_raw, max=self.index_topk
         )
         self.c4_sparse_page_indices = torch.full(
-            (self.c4_topk_lengths_clamp1.size(0), self.c4_sparse_topk),
+            (self.c4_topk_lengths_clamp1.size(0), self.index_topk),
             -1,
             dtype=torch.int32,
             device=self.c4_topk_lengths_clamp1.device,
@@ -470,7 +468,7 @@ class DeepseekV4HipRadixBackend(
         self.MAX_SEQ_LEN_FOR_CAPTURE = self.req_to_token.shape[1]
 
         assert isinstance(self.token_to_kv_pool, DeepSeekV4TokenToKVPool)
-        self.c4_topk = getattr(
+        self.index_topk = getattr(
             model_runner.model_config.hf_text_config, "index_topk", C4_TOPK
         )
         self.enable_deepseek_v4_fp4_indexer: bool = (
@@ -1366,17 +1364,8 @@ class DeepseekV4HipRadixBackend(
         attn_sink: torch.Tensor,
         core_attn_metadata: DSV4AttnMetadata,
         save_kv_cache: bool = True,
-        q_rope: Optional[torch.Tensor] = None,
-        k_rope: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """unified_kv paged-attention path over the unified_kv pool.
-
-        ``q_rope`` is what tells the two layouts apart: present means ``q`` is a
-        packed fp8 row and the pool is the two-pool fp8 one, so decode goes to
-        the asm reader; absent means both are plain bf16 and it goes to Triton.
-        Prefill needs ``k_rope`` alongside it, because there the current chunk is
-        a KV source of its own and not just something to store.
-        """
+        """unified_kv paged-attention path over the bf16 unified_kv"""
         from sglang.kernels.ops.attention.dsv4.unified_kv_kernels import runtime
 
         pool = self.token_to_kv_pool
@@ -1410,10 +1399,6 @@ class DeepseekV4HipRadixBackend(
             else:
                 state_slot = forward_batch.req_pool_indices[:T]
             if save_kv_cache:
-                # Only verify reaches this under fp8 -- plain decode's rows are
-                # written by the fused kernel itself, which leaves kv None. The
-                # pair arrives already packed, so this is the same scatter with
-                # a second pool hanging off it.
                 runtime.store_swa_into_unified(
                     kv=kv,
                     state_slot=state_slot,
@@ -1422,10 +1407,6 @@ class DeepseekV4HipRadixBackend(
                     win=win,
                     ring_stride=ring_stride,
                     final_pos=positions,
-                    kv_rope=k_rope,
-                    unified_kv_rope=(
-                        None if k_rope is None else pool.get_unified_kv_rope(layer_id)
-                    ),
                 )
             unified_metadata = core_attn_metadata.unified
             if compress_ratio == 0:
@@ -1447,25 +1428,6 @@ class DeepseekV4HipRadixBackend(
                 )
             else:
                 raise ValueError(f"bad compress_ratio {compress_ratio}")
-            if q_rope is not None:
-                # softmax_scale is not passed on: the asm kernel hardcodes
-                # 1/sqrt(512), which is what self.softmax_scale already is for
-                # V4's head_dim=512. The other readers here take it explicitly,
-                # so a head_dim change would leave only this one mis-scaled.
-                assert self.softmax_scale == 512**-0.5, (
-                    "the v4 nm asm kernel hardcodes 1/sqrt(512), this backend is "
-                    f"at {self.softmax_scale}"
-                )
-                return runtime.decode_fp8_2buff(
-                    q=q,
-                    q_rope=q_rope,
-                    unified_kv=unified,
-                    unified_kv_rope=pool.get_unified_kv_rope(layer_id),
-                    kv_indices=kv_indices,
-                    kv_indptr=kv_indptr,
-                    attn_sink=attn_sink,
-                    v_head_dim=layer.v_head_dim,
-                )
             return runtime.decode(
                 q=q,
                 unified_kv=unified,
@@ -1541,42 +1503,17 @@ class DeepseekV4HipRadixBackend(
             pad = T + 1 - kpre_p.shape[0]
             kpre_p = torch.cat([kpre_p, kpre_p[-1:].expand(pad)])
             kext_p = torch.cat([kext_p, kext_p[-1:].expand(pad)])
-        if q_rope is not None:
-            assert k_rope is not None, (
-                "fp8 prefill needs the extend rope half beside the packed nope; "
-                "q_rope came through but k_rope did not"
-            )
-            # No empty-segment mask on the result, unlike decode: this kernel
-            # returns zeros for a token with neither region where the asm decode
-            # reader leaves the row NaN. Chunk 0 tokens have an empty prefix and
-            # a non-empty extend, which both readers handle.
-            o = runtime.prefill_fp8_2buff(
-                q=q,
-                q_rope=q_rope,
-                unified_kv=unified,
-                unified_kv_rope=pool.get_unified_kv_rope(layer_id),
-                kv_indices_prefix=kpre_i,
-                kv_indptr_prefix=kpre_p,
-                kv_extend=kv,
-                kv_extend_rope=k_rope,
-                kv_indices_extend=kext_i,
-                kv_indptr_extend=kext_p,
-                attn_sink=attn_sink,
-                softmax_scale=self.softmax_scale,
-                v_head_dim=layer.v_head_dim,
-            )
-        else:
-            o = runtime.prefill(
-                q=q,
-                unified_kv=unified,
-                kv_indices_prefix=kpre_i,
-                kv_indptr_prefix=kpre_p,
-                kv_extend=kv,
-                kv_indices_extend=kext_i,
-                kv_indptr_extend=kext_p,
-                attn_sink=attn_sink,
-                softmax_scale=self.softmax_scale,
-            )
+        o = runtime.prefill(
+            q=q,
+            unified_kv=unified,
+            kv_indices_prefix=kpre_i,
+            kv_indptr_prefix=kpre_p,
+            kv_extend=kv,
+            kv_indices_extend=kext_i,
+            kv_indptr_extend=kext_p,
+            attn_sink=attn_sink,
+            softmax_scale=self.softmax_scale,
+        )
 
         # write this chunk's SWA K into the ring for future chunks / decode
         # only the final-window tokens per request
@@ -1596,10 +1533,6 @@ class DeepseekV4HipRadixBackend(
                 win=win,
                 ring_stride=ring_stride,
                 final_pos=_ring_final_pos,
-                kv_rope=None if k_rope is None else k_rope[:n_real],
-                unified_kv_rope=(
-                    None if k_rope is None else pool.get_unified_kv_rope(layer_id)
-                ),
             )
         return o
 
@@ -1667,8 +1600,6 @@ class DeepseekV4HipRadixBackend(
         compress_ratio: Literal[0, 4, 128],
         save_kv_cache: bool = True,
         attn_sink: Optional[torch.Tensor] = None,
-        q_rope: Optional[torch.Tensor] = None,
-        k_rope: Optional[torch.Tensor] = None,
         **_,
     ) -> torch.Tensor:
         if self.mtp_enabled and forward_batch.forward_mode.is_idle():
@@ -1697,8 +1628,6 @@ class DeepseekV4HipRadixBackend(
                 attn_sink=attn_sink,
                 core_attn_metadata=core_attn_metadata,
                 save_kv_cache=save_kv_cache,
-                q_rope=q_rope,
-                k_rope=k_rope,
             )
 
         if isinstance(core_attn_metadata, DSV4AttnMetadata):
@@ -1851,7 +1780,7 @@ class DeepseekV4HipRadixBackend(
             page_table=page_table,
             swa_page_indices=swa_page_indices,
             swa_topk_lengths=swa_topk_lengths,
-            c4_sparse_topk=self.c4_topk,
+            index_topk=self.index_topk,
         )
 
         if need_compress:

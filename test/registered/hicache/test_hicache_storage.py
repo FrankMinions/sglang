@@ -44,7 +44,6 @@ class TestHiCache(CustomTestCase, MMLUMixin):
                 "--hicache-storage-backend",
                 "file",
             ],
-            env={"SGLANG_ENABLE_RANK_CONSENSUS_CHECKER": "1"},
         )
 
     @classmethod

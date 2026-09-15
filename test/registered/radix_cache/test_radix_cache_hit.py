@@ -31,7 +31,6 @@ class TestRadixCacheHit(CustomTestCase):
             cls.model,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            env={"SGLANG_ENABLE_RANK_CONSENSUS_CHECKER": "1"},
         )
 
     @classmethod

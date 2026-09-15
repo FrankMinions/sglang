@@ -57,11 +57,7 @@ class TestPPWithHiCache(unittest.TestCase):
             if value is not True:
                 final_server_args.append(str(value))
 
-        env_vars = {
-            **os.environ,
-            **cls._mooncake_env(),
-            "SGLANG_ENABLE_RANK_CONSENSUS_CHECKER": "1",
-        }
+        env_vars = {**os.environ, **cls._mooncake_env()}
 
         try:
             cls.process = popen_launch_server(

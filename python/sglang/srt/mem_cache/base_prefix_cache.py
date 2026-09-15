@@ -3,7 +3,6 @@ from __future__ import annotations
 import dataclasses
 import time
 from abc import ABC, abstractmethod
-from enum import Enum, auto
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -37,17 +36,6 @@ if TYPE_CHECKING:
         CacheAction,
         ComponentAction,
     )
-
-
-@dataclasses.dataclass(frozen=True)
-class CacheRequestHandle:
-    rid: str
-    attempt_id: int
-
-
-class CacheRequestOutcome(Enum):
-    SUCCESS = auto()
-    ABORT = auto()
 
 
 @runtime_checkable
@@ -358,14 +346,6 @@ class BasePrefixCache(ABC, PrefixCacheTrait):
         tens of seconds (see HostKVCache.destroy). Idempotent.
         """
 
-    def release_aborted_request(self, handle: CacheRequestHandle) -> None:
-        """Release attempt state; caches without prefetch state have nothing to drop."""
-
-    def finish(self, handle: CacheRequestHandle, outcome: CacheRequestOutcome) -> None:
-        """Finish an attempt without cancelling successful asynchronous cache work."""
-        if outcome != CacheRequestOutcome.SUCCESS:
-            self.release_aborted_request(handle)
-
     @abstractmethod
     def reset(self):
         pass
@@ -435,14 +415,12 @@ class BasePrefixCache(ABC, PrefixCacheTrait):
         """Give back ascending, disjoint, half-open row-position ranges
         of the ``kv`` record's row; one call keeps a shared page freed once.
         """
-        from sglang.srt.mem_cache.common import coalesce_ranges, free_kv_row_segments
+        from sglang.srt.mem_cache.common import free_kv_row_segments
 
         row = self.req_to_token_pool.req_to_token[kv.req_pool_idx]
-        # Adjacent pieces whose seam falls inside one (DCP-widened) page would
-        # free that page twice; the allocator rejects that, so merge them first.
         free_kv_row_segments(
             self.token_to_kv_pool_allocator,
-            [(row[start:end], start) for start, end in coalesce_ranges(ranges)],
+            [(row[start:end], start) for start, end in ranges],
             swa_evicted_seqlen=kv.swa_evicted_seqlen,
         )
 
@@ -504,24 +482,19 @@ class BasePrefixCache(ABC, PrefixCacheTrait):
         raise NotImplementedError()
 
     def finish_storage_prefetch_admission(
-        self,
-        handle: CacheRequestHandle,
-        fulfilled_tokens: int,
-        reason: Optional[str],
+        self, req_id: str, fulfilled_tokens: int, reason: Optional[str]
     ) -> None:
         """Resolve storage-hit accounting once a request is admitted.
 
         Non-storage caches have no lifecycle state to resolve.
         """
 
-    def discard_storage_prefetch_accounting(self, handle: CacheRequestHandle) -> None:
+    def discard_storage_prefetch_accounting(self, req_id: str) -> None:
         """Forget storage-hit lifecycle state without emitting a result."""
 
-    def pop_prefetch_loaded_span(
-        self, handle: CacheRequestHandle
-    ) -> tuple[int, Optional[int]]:
+    def pop_prefetch_loaded_span(self, req_id: str) -> tuple[int, Optional[int]]:
         """Pop L3-loaded tokens and their absolute prefix start, if known."""
-        return self.pop_prefetch_loaded_tokens(handle), None
+        return self.pop_prefetch_loaded_tokens(req_id), None
 
     def ready_to_load_host_cache(self) -> Any:
         """

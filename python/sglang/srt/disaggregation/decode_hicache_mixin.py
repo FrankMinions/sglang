@@ -12,7 +12,6 @@ import torch
 from sglang.srt.disaggregation.base import KVPoll
 from sglang.srt.managers.schedule_policy import match_prefix_for_req
 from sglang.srt.mem_cache.base_prefix_cache import (
-    CacheRequestOutcome,
     InitLoadBackParams,
 )
 
@@ -130,7 +129,7 @@ class DecodeHiCachePreallocMixin:
                 else None
             )
             self.tree_cache.prefetch_from_storage(
-                req.cache_request_handle,
+                req.rid,
                 prefix_match.last_host_node,
                 suffix,
                 last_hash,
@@ -138,8 +137,8 @@ class DecodeHiCachePreallocMixin:
                 extra_key=req.extra_key,
                 cache_salt=req.cache_salt,
             )
-            prefix_match.prefetch_registered = self.tree_cache.has_ongoing_prefetch(
-                req.cache_request_handle
+            prefix_match.prefetch_registered = (
+                req.rid in self.tree_cache.ongoing_prefetch
             )
         except Exception as e:
             logger.warning(
@@ -187,9 +186,7 @@ class DecodeHiCacheTransferMixin:
             decode_req.prefix_match is not None
             and decode_req.prefix_match.prefetch_registered
         ):
-            self.tree_cache.finish(
-                decode_req.req.cache_request_handle, CacheRequestOutcome.ABORT
-            )
+            self.tree_cache.release_aborted_request(decode_req.req.rid)
         if decode_req.hicache_restored_node is not None:
             self.tree_cache.dec_lock_ref(
                 decode_req.hicache_restored_node,
@@ -210,9 +207,9 @@ class DecodeHiCacheTransferMixin:
 
         # Wait for L3 -> L2 prefetch to drain (skip when no L3 hit).
         if pm.l3_storage_hit_length > 0:
-            if not self.tree_cache.check_prefetch_progress(dr.req.cache_request_handle):
+            if not self.tree_cache.check_prefetch_progress(dr.req.rid):
                 return False
-            self.tree_cache.pop_prefetch_loaded_tokens(dr.req.cache_request_handle)
+            self.tree_cache.pop_prefetch_loaded_tokens(dr.req.rid)
 
         # Re-match: req.last_node / prefix_indices updated to current device state.
         rematch = match_prefix_for_req(

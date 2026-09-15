@@ -785,7 +785,7 @@ async def model_info():
             config=resolving_view(_global_state.tokenizer_manager.server_args),
             model_config=model_config,
         )
-    return msgspec_to_builtins(result)
+    return result
 
 
 @app.get("/get_weight_version")
@@ -2241,6 +2241,7 @@ def _execute_server_warmup(server_args: ServerArgs):
         bool(model_info.get("has_image_understanding", False))
         and not get_disagg().language_only
         and not get_disagg().language_model_only
+        and not get_exec().features.enable_encoder_swa_bounded_replay
         and not is_mps()
     )
     if model_info["is_generation"]:
