@@ -4050,8 +4050,16 @@ class DeepseekV4ForCausalLM(nn.Module):
         self.quant_config = quant_config
         self.wo_a_fp8 = wo_a_fp8_gemm_enabled(quant_config)
         self.determine_num_fused_shared_experts()
+        self._language_only = bool(
+            getattr(config, "language_only", False)
+            or getattr(config, "language_model_only", False)
+        )
+        self._encoder_only = bool(getattr(config, "encoder_only", False))
+        self._has_dsv41_vision = (
+            config.model_type == "deepseek_v41" and config.vision_n_layers > 0
+        )
         self.vision = None
-        if config.model_type == "deepseek_v41" and config.vision_n_layers > 0:
+        if self._has_dsv41_vision and not self._language_only:
             if (
                 get_parallel().attn_cp_size != 1
                 or get_pp_group().world_size != 1
@@ -4067,40 +4075,49 @@ class DeepseekV4ForCausalLM(nn.Module):
             self.image_start = nn.Parameter(torch.empty(config.hidden_size))
             self.image_end = nn.Parameter(torch.empty(config.hidden_size))
             self.image_newline = nn.Parameter(torch.empty(config.hidden_size))
-        self.model = DeepseekV4Model(
-            config, quant_config, prefix=add_prefix("model", prefix)
-        )
+
         self.pp_group = get_pp_group()
-        if self.pp_group.is_last_rank:
-            if self.pp_group.world_size == 1 and config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=add_prefix("lm_head", prefix),
-                    use_attn_tp_group=get_parallel().enable_dp_lm_head,
-                )
+        if self._encoder_only:
+            self.model = None
+            self.lm_head = None
+            self.logits_processor = None
+            self.start_layer = 0
+            self.end_layer = 0
+            self._routed_experts_weights_of_layer = LazyValue(lambda: {})
         else:
-            self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config)
+            self.model = DeepseekV4Model(
+                config, quant_config, prefix=add_prefix("model", prefix)
+            )
+            if self.pp_group.is_last_rank:
+                if self.pp_group.world_size == 1 and config.tie_word_embeddings:
+                    self.lm_head = self.model.embed_tokens
+                else:
+                    self.lm_head = ParallelLMHead(
+                        config.vocab_size,
+                        config.hidden_size,
+                        quant_config=quant_config,
+                        prefix=add_prefix("lm_head", prefix),
+                        use_attn_tp_group=get_parallel().enable_dp_lm_head,
+                    )
+            else:
+                self.lm_head = PPMissingLayer()
+            self.logits_processor = LogitsProcessor(config)
+            # Expose start_layer/end_layer for model_runner PP support
+            self.start_layer = self.model.start_layer
+            self.end_layer = self.model.end_layer
+            self._routed_experts_weights_of_layer = LazyValue(
+                lambda: {
+                    layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
+                    for layer_id in range(self.model.start_layer, self.model.end_layer)
+                    if isinstance(
+                        self.model.layers[layer_id].mlp, deepseek_v2.DeepseekV2MoE
+                    )
+                }
+            )
+
         self.capture_aux_hidden_states = False
-        get_attn_tp_context().init_context(config.q_lora_rank, is_dsa=True)
-
-        self._routed_experts_weights_of_layer = LazyValue(
-            lambda: {
-                layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
-                for layer_id in range(self.model.start_layer, self.model.end_layer)
-                if isinstance(
-                    self.model.layers[layer_id].mlp, deepseek_v2.DeepseekV2MoE
-                )
-            }
-        )
-
-        # Expose start_layer/end_layer for model_runner PP support
-        self.start_layer = self.model.start_layer
-        self.end_layer = self.model.end_layer
+        if not self._encoder_only:
+            get_attn_tp_context().init_context(config.q_lora_rank, is_dsa=True)
 
         # update_weights_from_disk/_tensor/_distributed re-enter load_weights
         # mid-serving (RL refit sends many partial batches); the prewarm and
@@ -4120,6 +4137,11 @@ class DeepseekV4ForCausalLM(nn.Module):
     def get_image_feature(self, items):
         """Return complete spans for the shared MM cache and chunk scheduler."""
 
+        if self.vision is None:
+            raise RuntimeError(
+                "get_image_feature() requires a encoder-only ViT; "
+                "language-only EPD nodes must use precomputed embeddings."
+            )
         spans = []
         device, dtype = self.image_start.device, self.image_start.dtype
         for item in items:
@@ -4163,6 +4185,10 @@ class DeepseekV4ForCausalLM(nn.Module):
         return input_embeds
 
     def get_input_embeddings(self) -> nn.Module:
+        if self.model is None:
+            raise AttributeError(
+                "get_input_embeddings() is not available in encoder_only mode"
+            )
         return self.model.get_input_embeddings()
 
     def set_dspark_layers_to_capture(self, layer_ids: List[int]) -> None:
@@ -4220,7 +4246,7 @@ class DeepseekV4ForCausalLM(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> torch.Tensor:
         if (
-            self.vision is not None
+            self._has_dsv41_vision
             and not forward_batch.forward_mode.is_decode()
             and forward_batch.mm_inputs is not None
             and any(x is not None for x in forward_batch.mm_inputs)
@@ -4228,7 +4254,7 @@ class DeepseekV4ForCausalLM(nn.Module):
             if input_embeds is not None:
                 raise ValueError("Cannot combine input_embeds and image inputs")
             input_embeds = self._prepare_mm_embeddings(input_ids, forward_batch)
-        if self.vision is not None and not (
+        if self._has_dsv41_vision and not (
             forward_batch.forward_mode.is_decode_or_idle()
             or forward_batch.forward_mode.is_target_verify()
         ):
@@ -4236,6 +4262,10 @@ class DeepseekV4ForCausalLM(nn.Module):
             # hashes for Engram and routing without changing the scheduler's IDs.
             input_ids = input_ids.masked_fill(
                 input_ids >= MM_PAD_SHIFT_VALUE, self.config.image_token_id
+            )
+        if self._encoder_only:
+            raise RuntimeError(
+                "DeepseekV4ForCausalLM.forward() must not run in encoder_only mode"
             )
 
         with get_attn_tp_context().maybe_input_scattered(forward_batch):
@@ -4335,6 +4365,8 @@ class DeepseekV4ForCausalLM(nn.Module):
                 attn.wo_a.weight_scale_inv.format_ue8m0 = False
 
     def post_load_weights(self, is_nextn=False, weight_names=None):
+        if self.model is None:
+            return
         if self.wo_a_fp8:
             self._setup_fp8_wo_a_scales(is_nextn)
 
@@ -4436,7 +4468,12 @@ class DeepseekV4ForCausalLM(nn.Module):
         if self._mhc_prewarmed_at_load:
             return
         self._mhc_prewarmed_at_load = True
-        if _is_npu or _is_xpu or not envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get():
+        if (
+            self.model is None
+            or _is_npu
+            or _is_xpu
+            or not envs.SGLANG_OPT_USE_TILELANG_MHC_PRE.get()
+        ):
             return
         layer = next(
             (m for m in self.model.layers if isinstance(m, DeepseekV4DecoderLayer)),
@@ -4592,12 +4629,22 @@ class DeepseekV4ForCausalLM(nn.Module):
                     skip_group = None
                     if not is_dsv41:
                         pass
+                    elif self._encoder_only and (
+                        name.startswith("model.")
+                        or name.startswith("lm_head.")
+                        or name.endswith(".gate.e_score_correction_bias")
+                        or name.endswith(".gate.e_score_correction_bias_vl")
+                    ):
+                        # Encoder only needs vision./aligner./image_*.
+                        skip_group = "language"
                     elif self.vision is None and name.startswith(
                         ("vision.", "aligner.", "image_")
                     ):
                         skip_group = "vision"
-                    elif self.vision is None and name.endswith(
-                        ".gate.e_score_correction_bias_vl"
+                    elif (
+                        self.vision is None
+                        and not self._has_dsv41_vision
+                        and name.endswith(".gate.e_score_correction_bias_vl")
                     ):
                         skip_group = "gate.bias_vl"
                     if skip_group is not None:
@@ -4609,6 +4656,7 @@ class DeepseekV4ForCausalLM(nn.Module):
                     layer_id = get_layer_id(name)
                     if (
                         layer_id is not None
+                        and self.model is not None
                         and hasattr(self.model, "start_layer")
                         and (
                             layer_id < self.model.start_layer
