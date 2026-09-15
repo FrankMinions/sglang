@@ -3832,6 +3832,20 @@ class Withable(Generic[T]):
             self._value = None
 
 
+def require_engram_dp_index_gather() -> bool:
+    if not get_parallel().enable_dp_attention:
+        return False
+    if get_parallel().tp_size <= 1 or get_parallel().attn_dp_size <= 1:
+        return False
+    try:
+        from sglang.srt.runtime_context import process_model_config
+
+        layer_ids = getattr(process_model_config().hf_config, "engram_layer_ids", None)
+    except Exception:
+        return False
+    return bool(layer_ids)
+
+
 def require_mlp_tp_gather():
     """
     Check if the input of MLP is obtained by all-gather rather than all-reduce. This only happens when each MLP TP group contains multiple attention DP groups.
@@ -3880,10 +3894,12 @@ def require_mlp_tp_gather():
             # Scoped to the opt-in gate so the default path is untouched.
             return True
         else:
-            return (
+            if (
                 get_parallel().moe_dense_tp_size
                 > get_parallel().tp_size // get_parallel().dp_size
-            )
+            ):
+                return True
+            return require_engram_dp_index_gather()
     else:
         return False
 
