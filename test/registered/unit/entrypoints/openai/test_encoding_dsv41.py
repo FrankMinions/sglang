@@ -6,6 +6,7 @@ register_cpu_ci(est_time=5, suite="base-a-test-cpu")
 
 import unittest
 
+from sglang.srt.entrypoints.openai import encoding_dsv41
 from sglang.srt.entrypoints.openai.encoding_dsv41 import (
     encode_messages,
 )
@@ -65,6 +66,36 @@ class TestDsmlTags(CustomTestCase):
             "<tool_result>second result</tool_result><｜Assistant｜><think>"
         )
         self.assertEqual(prompt[prompt.index("<｜User｜>") :], expected)
+
+
+class TestDeepSeekV41Encoding(CustomTestCase):
+    def test_release_reasoning_effort_budgets(self):
+        expected_budgets = {
+            "low": 50,
+            "high": 75,
+            "xhigh": 75,
+            "max": 100,
+        }
+
+        for effort, budget in expected_budgets.items():
+            with self.subTest(effort=effort):
+                self.assertEqual(
+                    encoding_dsv41.render_reasoning_effort(
+                        index=0,
+                        thinking_mode="thinking",
+                        effort=effort,
+                    ),
+                    encoding_dsv41.REASONING_EFFORT_TEMPLATE.format(budget=budget),
+                )
+
+        self.assertEqual(
+            encoding_dsv41.render_reasoning_effort(
+                index=0,
+                thinking_mode="thinking",
+                effort=None,
+            ),
+            encoding_dsv41.REASONING_EFFORT_TEMPLATE.format(budget=75),
+        )
 
 
 if __name__ == "__main__":
