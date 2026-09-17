@@ -5555,7 +5555,7 @@ class DeepseekV4ForCausalLM(nn.Module):
 
         self.post_load_weights(is_nextn=is_nextn, weight_names=weight_names)
 
-        if not is_nextn:
+        if not is_nextn and self.model is not None:
             for i, layer in enumerate(self.model.layers):
                 if getattr(layer, "engram", None) is not None:
                     layer.engram.embed.finish_load(label=f"layer {i}")
