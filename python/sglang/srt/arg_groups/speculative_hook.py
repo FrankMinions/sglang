@@ -559,10 +559,11 @@ def _handle_dspark(server_args: ServerArgs) -> None:
             not _is_npu
             and cfg.speculative_moe_a2a_backend is not None
             and cfg.speculative_moe_a2a_backend != cfg.moe_a2a_backend
+            and cfg.speculative_moe_a2a_backend != "none"
         ):
             raise ValueError(
-                "DSpark ignores --speculative-moe-a2a-backend; with dp attention it "
-                f"must match the target moe_a2a_backend={cfg.moe_a2a_backend!r} "
+                "With dp attention, --speculative-moe-a2a-backend must match "
++               f"target moe_a2a_backend={cfg.moe_a2a_backend!r} or be 'none' "
                 f"(got {cfg.speculative_moe_a2a_backend!r})."
             )
 
